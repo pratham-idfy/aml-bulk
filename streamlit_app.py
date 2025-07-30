@@ -32,11 +32,7 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
 def setup_database():
-    """Ensures the jobs table exists and reconciles stale jobs on startup."""
-    # Use session state to ensure this runs only once per session
-    if "reconciliation_done" in st.session_state:
-        return
-
+    if "reconciliation_done" in st.session_state: return
     conn = get_db_connection()
     if not conn: return
     with conn.cursor() as cursor:
@@ -48,8 +44,7 @@ def setup_database():
                 total_rows INTEGER, processed_rows INTEGER DEFAULT 0, error_message TEXT
             );
         """)
-        # Reconcile jobs that were 'running' during a restart
-        cursor.execute("UPDATE jobs SET status = 'failed', error_message = 'App restarted during processing' WHERE status = 'running';")
+        cursor.execute("UPDATE jobs SET status = 'failed', error_message = 'App restarted' WHERE status = 'running';")
     conn.commit()
     conn.close()
     st.session_state.reconciliation_done = True
@@ -95,9 +90,8 @@ def make_api_call(full_name, entity_type, dob=None, pan_number=None):
     return None, -1, "Max retries reached"
 
 def run_bulk_job(job_id, input_filepath, output_filepath):
-    print(f"Starting job {job_id}")
-    update_job_status(job_id, "running")
     try:
+        update_job_status(job_id, "running")
         with open(input_filepath, 'r', newline='', errors='ignore') as infile, open(output_filepath, 'w', newline='') as outfile:
             reader, writer = csv.reader(infile), csv.writer(outfile)
             try:
@@ -135,7 +129,8 @@ st.title("Bulk AML Check Runner")
 setup_database()
 
 st.header("Submit a New Job")
-uploaded_file = st.file_uploader("Choose a CSV file", type="csv", help=f"Maximum file size: {MAX_FILE_SIZE_MB}MB")
+st.markdown(f"**Upload a CSV file (Maximum size: {MAX_FILE_SIZE_MB}MB)**")
+uploaded_file = st.file_uploader("Upload CSV", type="csv", label_visibility="collapsed")
 if uploaded_file:
     if uploaded_file.size > MAX_FILE_SIZE_BYTES:
         st.error(f"File is too large ({uploaded_file.size / 1024 / 1024:.1f}MB). Maximum size is {MAX_FILE_SIZE_MB}MB.")
@@ -157,26 +152,62 @@ if uploaded_file:
         time.sleep(2)
         st.rerun()
 
+# --- Dashboard & Download Section ---
 st.header("Job Dashboard")
+
 conn = get_db_connection()
+jobs_df = pd.DataFrame()
+
 if conn:
-    jobs_df = pd.read_sql("SELECT job_id, status, start_timestamp, input_filename, total_rows, processed_rows, error_message FROM jobs ORDER BY start_timestamp DESC", conn)
-    conn.close()
-    if not jobs_df.empty:
-        st.dataframe(jobs_df, column_config={
-            "job_id": "Job ID", "status": "Status", "start_timestamp": "Submitted At",
-            "input_filename": "Input File", "total_rows": "Total Rows",
-            "processed_rows": st.column_config.ProgressColumn("Progress", format="%f / %d", min_value=0, max_value=int(jobs_df['total_rows'].max()) if not jobs_df.empty else 0),
+    try:
+        jobs_df = pd.read_sql("SELECT * FROM jobs ORDER BY start_timestamp DESC", conn)
+    finally:
+        conn.close()
+
+if not jobs_df.empty:
+    # --- Correctly calculate and format progress ---
+    # Avoid division by zero and handle None values
+    jobs_df['total_rows'] = pd.to_numeric(jobs_df['total_rows'], errors='coerce').fillna(0).astype(int)
+    jobs_df['processed_rows'] = pd.to_numeric(jobs_df['processed_rows'], errors='coerce').fillna(0).astype(int)
+    
+    # Calculate progress fraction for the bar (0.0 to 1.0)
+    jobs_df['progress_fraction'] = jobs_df.apply(
+        lambda row: row['processed_rows'] / row['total_rows'] if row['total_rows'] > 0 else 0,
+        axis=1
+    )
+    # Create the text to display on the bar
+    jobs_df['progress_text'] = jobs_df.apply(
+        lambda row: f"{row['processed_rows']} / {row['total_rows']}",
+        axis=1
+    )
+
+    st.dataframe(
+        jobs_df,
+        column_order=["job_id", "status", "start_timestamp", "input_filename", "progress_fraction", "error_message"],
+        column_config={
+            "job_id": "Job ID",
+            "status": "Status",
+            "start_timestamp": "Submitted At",
+            "input_filename": "Input File",
+            "progress_fraction": st.column_config.ProgressColumn(
+                "Progress",
+                help="Number of rows processed",
+                format="%s",  # Use %s to display the custom text
+                min_value=0,
+                max_value=1, # The bar is driven by the 0-1 fraction
+                # The text is taken from the underlying data, which we have now formatted as a string
+            ),
             "error_message": "Error"
-        }, use_container_width=True, hide_index=True)
-    else:
-        st.info("No jobs found.")
+        },
+        use_container_width=True, 
+        hide_index=True
+    )
+else:
+    st.info("No jobs found.")
 
 st.header("Download Results")
-if conn:
-    # Re-fetch only completed jobs for the download section
-    completed_jobs_df = pd.read_sql("SELECT job_id, input_filename, output_filename FROM jobs WHERE status = 'completed' AND output_filename IS NOT NULL ORDER BY start_timestamp DESC", conn)
-    conn.close()
+if not jobs_df.empty:
+    completed_jobs_df = jobs_df[jobs_df['status'] == 'completed']
     if not completed_jobs_df.empty:
         job_to_download = st.selectbox(
             'Select a completed job to download',
@@ -184,7 +215,7 @@ if conn:
             format_func=lambda x: f"{x[:8]}... ({completed_jobs_df.loc[completed_jobs_df.job_id == x, 'input_filename'].iloc[0]})"
         )
         if job_to_download:
-            output_filename = completed_jobs_df.loc[completed_jobs_df.job_id == x, 'output_filename'].iloc[0]
+            output_filename = completed_jobs_df.loc[completed_jobs_df.job_id == job_to_download, 'output_filename'].iloc[0]
             output_filepath = os.path.join(UPLOAD_FOLDER, output_filename)
             if os.path.exists(output_filepath):
                 with open(output_filepath, "rb") as f:
