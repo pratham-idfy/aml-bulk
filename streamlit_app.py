@@ -1,3 +1,4 @@
+
 import os
 import streamlit as st
 import pandas as pd
@@ -104,12 +105,18 @@ def run_bulk_job(job_id, input_filepath, output_filepath):
                 if len(row) < 3: continue
                 _, full_name, entity_type = row[0], row[1].strip(), row[2].strip()
                 dob, pan_number = (row[3].strip() if len(row) > 3 else None), (row[4].strip() if len(row) > 4 else None)
+                
                 response_json, status_code, error = make_api_call(full_name, entity_type, dob, pan_number)
+                
                 match_status, total_hits, hits_json = None, None, None
-                if response_json and response_json.get("status") == "success":
+                # --- CORRECTED DATA HANDLING LOGIC ---
+                if status_code == 200 and response_json:
                     result = response_json.get("result", {})
-                    match_status, total_hits, hits_url = result.get("match_status"), result.get("total_hits"), result.get("hits")
+                    match_status = result.get("match_status")
+                    total_hits = result.get("total_hits")
+                    hits_url = result.get("hits")
                     hits_json = fetch_hits_json(hits_url)
+                
                 writer.writerow(row + [status_code, match_status, total_hits, error, hits_json])
                 time.sleep(1)
                 processed_count += 1
@@ -165,38 +172,20 @@ if conn:
         conn.close()
 
 if not jobs_df.empty:
-    # --- Correctly calculate and format progress ---
-    # Avoid division by zero and handle None values
+    # --- CORRECTED PROGRESS DISPLAY ---
     jobs_df['total_rows'] = pd.to_numeric(jobs_df['total_rows'], errors='coerce').fillna(0).astype(int)
     jobs_df['processed_rows'] = pd.to_numeric(jobs_df['processed_rows'], errors='coerce').fillna(0).astype(int)
-    
-    # Calculate progress fraction for the bar (0.0 to 1.0)
-    jobs_df['progress_fraction'] = jobs_df.apply(
-        lambda row: row['processed_rows'] / row['total_rows'] if row['total_rows'] > 0 else 0,
-        axis=1
-    )
-    # Create the text to display on the bar
-    jobs_df['progress_text'] = jobs_df.apply(
-        lambda row: f"{row['processed_rows']} / {row['total_rows']}",
-        axis=1
-    )
+    jobs_df['Progress'] = jobs_df.apply(lambda row: f"{row['processed_rows']} / {row['total_rows']}", axis=1)
 
     st.dataframe(
         jobs_df,
-        column_order=["job_id", "status", "start_timestamp", "input_filename", "progress_fraction", "error_message"],
+        column_order=["job_id", "status", "start_timestamp", "input_filename", "Progress", "error_message"],
         column_config={
             "job_id": "Job ID",
             "status": "Status",
             "start_timestamp": "Submitted At",
             "input_filename": "Input File",
-            "progress_fraction": st.column_config.ProgressColumn(
-                "Progress",
-                help="Number of rows processed",
-                format="%s",  # Use %s to display the custom text
-                min_value=0,
-                max_value=1, # The bar is driven by the 0-1 fraction
-                # The text is taken from the underlying data, which we have now formatted as a string
-            ),
+            "Progress": "Progress",
             "error_message": "Error"
         },
         use_container_width=True, 
