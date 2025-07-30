@@ -220,7 +220,7 @@ if uploaded_file is not None:
         st.success(f"Job submitted successfully! Job ID: {job_id}")
         st.info("Dashboard will update automatically.")
         time.sleep(2) # Give a moment for the page to auto-refresh
-        st.experimental_rerun()
+        st.rerun()
 
 
 st.header("Job Dashboard")
@@ -246,7 +246,7 @@ if conn:
                     help="Number of rows processed",
                     format="%f",
                     min_value=0,
-                    max_value=jobs_df['total_rows'].max(), # A bit of a hack, but works visually
+                    max_value=int(jobs_df['total_rows'].max()), # Convert numpy.int64 to python int
                 ),
                 "output_filename": st.column_config.LinkColumn(
                     "Output File",
@@ -267,4 +267,4 @@ else:
 
 # Auto-refresh the page every 30 seconds
 time.sleep(30)
-st.experimental_rerun()
+st.rerun()
