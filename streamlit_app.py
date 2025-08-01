@@ -77,7 +77,7 @@ def fetch_hits_json(hits_url):
 
 def make_api_call(full_name, entity_type, dob=None, pan_number=None):
     headers = {'Content-Type': 'application/json', 'api-key': API_KEY, 'account-id': ACCOUNT_ID}
-    filters = {"types": ["sanctions", "pep", "warnings"], "name_fuzziness": "1", "search_profile": "all_default", "country_codes": ["IN"], "entity_type": entity_type.lower()}
+    filters = {"types": ["sanctions"], "name_fuzziness": "1", "search_profile": "all_default", "country_codes": ["IN"], "entity_type": entity_type.lower()}
     if entity_type.lower() == 'individual' and dob and dob.strip(): filters["birth_year"] = dob.strip()
     if pan_number and pan_number.strip(): filters["pan_number"] = pan_number.strip()
     data = {"task_id": str(uuid.uuid4()), "group_id": str(uuid.uuid4()), "data": {"search_term": full_name, "filters": filters, "version": "2", "get_profile_pdf": False}}
