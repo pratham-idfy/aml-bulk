@@ -1,4 +1,3 @@
-
 import os
 import streamlit as st
 import pandas as pd
@@ -20,6 +19,7 @@ st.set_page_config(page_title="Bulk Job Runner", layout="wide")
 DATABASE_URL = os.getenv("DATABASE_URL")
 API_KEY = os.getenv("API_KEY")
 ACCOUNT_ID = os.getenv("ACCOUNT_ID")
+AUTH_CODE = os.getenv("AUTH_CODE")
 MAX_FILE_SIZE_MB = 20
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
@@ -105,18 +105,12 @@ def run_bulk_job(job_id, input_filepath, output_filepath):
                 if len(row) < 3: continue
                 _, full_name, entity_type = row[0], row[1].strip(), row[2].strip()
                 dob, pan_number = (row[3].strip() if len(row) > 3 else None), (row[4].strip() if len(row) > 4 else None)
-                
                 response_json, status_code, error = make_api_call(full_name, entity_type, dob, pan_number)
-                
                 match_status, total_hits, hits_json = None, None, None
-                # --- CORRECTED DATA HANDLING LOGIC ---
                 if status_code == 200 and response_json:
                     result = response_json.get("result", {})
-                    match_status = result.get("match_status")
-                    total_hits = result.get("total_hits")
-                    hits_url = result.get("hits")
+                    match_status, total_hits, hits_url = result.get("match_status"), result.get("total_hits"), result.get("hits")
                     hits_json = fetch_hits_json(hits_url)
-                
                 writer.writerow(row + [status_code, match_status, total_hits, error, hits_json])
                 time.sleep(1)
                 processed_count += 1
@@ -131,89 +125,87 @@ def run_bulk_job(job_id, input_filepath, output_filepath):
     except Exception as e:
         update_job_status(job_id, "failed", error_message=str(e))
 
-# --- Streamlit UI ---
-st.title("Bulk AML Check Runner")
-setup_database()
+# --- Main Application Logic ---
+def main_app():
+    st.title("Bulk AML Check Runner")
+    setup_database()
 
-st.header("Submit a New Job")
-st.markdown(f"**Upload a CSV file (Maximum size: {MAX_FILE_SIZE_MB}MB)**")
-uploaded_file = st.file_uploader("Upload CSV", type="csv", label_visibility="collapsed")
-if uploaded_file:
-    if uploaded_file.size > MAX_FILE_SIZE_BYTES:
-        st.error(f"File is too large ({uploaded_file.size / 1024 / 1024:.1f}MB). Maximum size is {MAX_FILE_SIZE_MB}MB.")
-    elif st.button("Start Processing"):
-        job_id = str(uuid.uuid4())
-        original_filename = uploaded_file.name
-        input_filepath = os.path.join(UPLOAD_FOLDER, f"{job_id}_{original_filename}")
-        with open(input_filepath, "wb") as f: f.write(uploaded_file.getbuffer())
-        with open(input_filepath, 'r', errors='ignore') as f: total_rows = sum(1 for _ in f) - 1
-        conn = get_db_connection()
-        with conn.cursor() as cursor:
-            cursor.execute("INSERT INTO jobs (job_id, status, start_timestamp, input_filename, total_rows) VALUES (%s, %s, %s, %s, %s)", (job_id, "pending", datetime.utcnow(), original_filename, total_rows))
-        conn.commit()
-        conn.close()
-        output_filepath = os.path.join(UPLOAD_FOLDER, f"{job_id}_output.csv")
-        thread = threading.Thread(target=run_bulk_job, args=(job_id, input_filepath, output_filepath))
-        thread.start()
-        st.success(f"Job submitted! Refreshing...")
-        time.sleep(2)
-        st.rerun()
+    st.header("Submit a New Job")
+    st.markdown(f"**Upload a CSV file (Maximum size: {MAX_FILE_SIZE_MB}MB)**")
+    uploaded_file = st.file_uploader("Upload CSV", type="csv", label_visibility="collapsed")
+    if uploaded_file:
+        if uploaded_file.size > MAX_FILE_SIZE_BYTES:
+            st.error(f"File is too large ({uploaded_file.size / 1024 / 1024:.1f}MB). Maximum size is {MAX_FILE_SIZE_MB}MB.")
+        elif st.button("Start Processing"):
+            job_id = str(uuid.uuid4())
+            original_filename = uploaded_file.name
+            input_filepath = os.path.join(UPLOAD_FOLDER, f"{job_id}_{original_filename}")
+            with open(input_filepath, "wb") as f: f.write(uploaded_file.getbuffer())
+            with open(input_filepath, 'r', errors='ignore') as f: total_rows = sum(1 for _ in f) - 1
+            conn = get_db_connection()
+            with conn.cursor() as cursor:
+                cursor.execute("INSERT INTO jobs (job_id, status, start_timestamp, input_filename, total_rows) VALUES (%s, %s, %s, %s, %s)", (job_id, "pending", datetime.utcnow(), original_filename, total_rows))
+            conn.commit()
+            conn.close()
+            output_filepath = os.path.join(UPLOAD_FOLDER, f"{job_id}_output.csv")
+            thread = threading.Thread(target=run_bulk_job, args=(job_id, input_filepath, output_filepath))
+            thread.start()
+            st.success(f"Job submitted! Refreshing...")
+            time.sleep(2)
+            st.rerun()
 
-# --- Dashboard & Download Section ---
-st.header("Job Dashboard")
-
-conn = get_db_connection()
-jobs_df = pd.DataFrame()
-
-if conn:
-    try:
-        jobs_df = pd.read_sql("SELECT * FROM jobs ORDER BY start_timestamp DESC", conn)
-    finally:
-        conn.close()
-
-if not jobs_df.empty:
-    # --- CORRECTED PROGRESS DISPLAY ---
-    jobs_df['total_rows'] = pd.to_numeric(jobs_df['total_rows'], errors='coerce').fillna(0).astype(int)
-    jobs_df['processed_rows'] = pd.to_numeric(jobs_df['processed_rows'], errors='coerce').fillna(0).astype(int)
-    jobs_df['Progress'] = jobs_df.apply(lambda row: f"{row['processed_rows']} / {row['total_rows']}", axis=1)
-
-    st.dataframe(
-        jobs_df,
-        column_order=["job_id", "status", "start_timestamp", "input_filename", "Progress", "error_message"],
-        column_config={
-            "job_id": "Job ID",
-            "status": "Status",
-            "start_timestamp": "Submitted At",
-            "input_filename": "Input File",
-            "Progress": "Progress",
-            "error_message": "Error"
-        },
-        use_container_width=True, 
-        hide_index=True
-    )
-else:
-    st.info("No jobs found.")
-
-st.header("Download Results")
-if not jobs_df.empty:
-    completed_jobs_df = jobs_df[jobs_df['status'] == 'completed']
-    if not completed_jobs_df.empty:
-        job_to_download = st.selectbox(
-            'Select a completed job to download',
-            options=completed_jobs_df['job_id'],
-            format_func=lambda x: f"{x[:8]}... ({completed_jobs_df.loc[completed_jobs_df.job_id == x, 'input_filename'].iloc[0]})"
-        )
-        if job_to_download:
-            output_filename = completed_jobs_df.loc[completed_jobs_df.job_id == job_to_download, 'output_filename'].iloc[0]
-            output_filepath = os.path.join(UPLOAD_FOLDER, output_filename)
-            if os.path.exists(output_filepath):
-                with open(output_filepath, "rb") as f:
-                    st.download_button("Download CSV", f, file_name=output_filename, mime='text/csv')
-            else:
-                st.error("Output file not found in storage.")
+    st.header("Job Dashboard")
+    conn = get_db_connection()
+    jobs_df = pd.DataFrame()
+    if conn:
+        try:
+            jobs_df = pd.read_sql("SELECT * FROM jobs ORDER BY start_timestamp DESC", conn)
+        finally:
+            conn.close()
+    if not jobs_df.empty:
+        jobs_df['Progress'] = jobs_df.apply(lambda r: f"{r['processed_rows']} / {r['total_rows']}", axis=1)
+        st.dataframe(jobs_df, column_order=["job_id", "status", "start_timestamp", "input_filename", "Progress", "error_message"], column_config={
+            "job_id": "Job ID", "status": "Status", "start_timestamp": "Submitted At",
+            "input_filename": "Input File", "Progress": "Progress", "error_message": "Error"
+        }, use_container_width=True, hide_index=True)
     else:
-        st.info("No completed jobs available for download.")
+        st.info("No jobs found.")
 
-# Auto-refresh logic
-time.sleep(30)
-st.rerun()
+    st.header("Download Results")
+    if not jobs_df.empty:
+        completed_jobs_df = jobs_df[jobs_df['status'] == 'completed']
+        if not completed_jobs_df.empty:
+            job_to_download = st.selectbox('Select a completed job', options=completed_jobs_df['job_id'], format_func=lambda x: f"{x[:8]}... ({completed_jobs_df.loc[completed_jobs_df.job_id == x, 'input_filename'].iloc[0]})" )
+            if job_to_download:
+                output_filename = completed_jobs_df.loc[completed_jobs_df.job_id == job_to_download, 'output_filename'].iloc[0]
+                output_filepath = os.path.join(UPLOAD_FOLDER, output_filename)
+                if os.path.exists(output_filepath):
+                    with open(output_filepath, "rb") as f:
+                        st.download_button("Download CSV", f, file_name=output_filename, mime='text/csv')
+                else:
+                    st.error("Output file not found in storage.")
+        else:
+            st.info("No completed jobs available for download.")
+
+    time.sleep(30)
+    st.rerun()
+
+def login_screen():
+    st.title("Application Access")
+    st.header("Please enter the Auth Code to continue")
+    auth_code_input = st.text_input("Auth Code", type="password")
+    if st.button("Login"):
+        if AUTH_CODE and auth_code_input == AUTH_CODE:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("The authentication code is incorrect.")
+
+# --- Authentication Gate ---
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+
+if st.session_state.authenticated:
+    main_app()
+else:
+    login_screen()
